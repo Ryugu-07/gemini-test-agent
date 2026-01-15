@@ -2,112 +2,187 @@ import streamlit as st
 from google import genai
 from google.genai import types
 import os
+from typing import TypedDict
+from langgraph.graph import StateGraph, END
 
-# --- 1. 页面装修 (Page Config) ---
-# layout="wide" 是关键，开启宽屏模式，利用你截图里那么大的屏幕
+# --- 1. 页面配置 ---
 st.set_page_config(
-    page_title="Gemini Pro Max",
-    page_icon="",
-    layout="wide", 
-    initial_sidebar_state="expanded"
+    page_title="Gemini 智能体工厂",
+    page_icon="🧠",
+    layout="wide"
 )
 
-# --- 2. 注入自定义 CSS (黑客技巧) ---
-# Streamlit 允许你写一点点 CSS 来微调样式
-st.markdown("""
-<style>
-    /* 隐藏 Streamlit 默认的右上角菜单 */
-    #MainMenu {visibility: hidden;}
-    /* 隐藏底部的 'Made with Streamlit' */
-    footer {visibility: hidden;}
-    /* 调整一下聊天气泡的字体大小 */
-    .stChatMessage {font-size: 1.1em;}
-</style>
-""", unsafe_allow_html=True)
+st.title("🧠 Gemini 深度思考 Agent")
+st.caption("集成 LangGraph：写作 -> 反思 -> 修正 自动化闭环")
 
-st.title(" Gemini 全栈交互终端")
-st.caption(" Powered by Google GenAI SDK v1.0 | Streamlit UI")
-
-# --- 3. 侧边栏装修 (Control Panel) ---
+# --- 2. 侧边栏配置 ---
 with st.sidebar:
-    st.title(" 控制面板")
-    
-    # API Key 输入 (使用 password 模式隐藏)
-    # 如果系统环境变量里有，就自动填入，省得每次输入
+    st.header(" 控制台")
+    # API Key 管理
     default_key = os.environ.get("GEMINI_API_KEY", "")
+    # 如果 secrets 里有，优先用 secrets
+    if "GEMINI_API_KEY" in st.secrets:
+        default_key = st.secrets["GEMINI_API_KEY"]
+        
     api_key = st.text_input("Gemini API Key", value=default_key, type="password")
     
-    st.divider() # 画一条分割线，显得专业
-    
-    st.subheader("模型配置")
-    
-    # 模型选择器 (Dropdown)
-    selected_model = st.selectbox(
-        "选择模型",
-        ["gemini-3-flash", "gemini-2.5-flash-lite", "gemini-2.5-flash"],
-        index=0
-    )
-    
-    # 参数滑块
-    temperature = st.slider("随机性 (Temperature)", 0.0, 2.0, 0.7, help="值越高，AI 越疯癫")
-    
     st.divider()
+    model_name = st.selectbox("选择模型", ["gemini-2.5-flash", "gemini-2.5-flash-lite"], index=0)
+    max_revisions = st.slider("最大反思次数", 1, 5, 2, help="批评家最多可以让作家重写几次？")
     
-    st.subheader("大脑设定 (System Prompt)")
-    # 文本区域，允许你实时修改 System Instruction
-    system_instruction = st.text_area(
-        "定义 AI 人设",
-        value="你是一个乐于助人的全栈开发助手，回答要简洁专业。",
-        height=100
-    )
-    
-    st.divider()
-    
-    # --- 挑战任务答案：清空记忆按钮 ---
-    # use_container_width=True 让按钮充满侧边栏，更好看
-    if st.button(" 清空对话记录", type="primary", use_container_width=True):
+    if st.button(" 清空对话", use_container_width=True):
         st.session_state.messages = []
-        st.rerun() # 立即刷新页面
+        st.rerun()
 
-# --- 4. 逻辑核心 ---
-if api_key:
-    client = genai.Client(api_key=api_key)
-else:
-    st.warning(" 请在左侧输入 API Key 启动引擎")
+# --- 3. 初始化 Client ---
+if not api_key:
+    st.warning("请先配置 API Key")
     st.stop()
 
-# 初始化 Session State
+client = genai.Client(api_key=api_key)
+
+# --- 4. 定义 LangGraph 逻辑 (Day 24 的核心) ---
+
+# 定义状态
+class AgentState(TypedDict):
+    task: str
+    draft: str
+    critique: str
+    revision_count: int
+    content_history: list # 用来记录中间过程，方便在网页展示
+
+# 定义节点 A：作家
+def writer_node(state: AgentState):
+    task = state['task']
+    critique = state.get('critique', "")
+    count = state.get('revision_count', 0)
+    history = state.get('content_history', [])
+    
+    if count == 0:
+        prompt = f"请简短地写一段关于 '{task}' 的介绍。"
+        step_name = " 初稿创作中..."
+    else:
+        prompt = f"""
+        原稿：{state['draft']}
+        批评意见：{critique}
+        任务：请根据批评意见，重写这段关于 '{task}' 的介绍。
+        """
+        step_name = f" 第 {count+1} 次修改中..."
+        
+    response = client.models.generate_content(
+        model=model_name, contents=prompt
+    )
+    
+    # 记录过程
+    history.append(f"**{step_name}**\n\n{response.text}")
+    
+    return {
+        "draft": response.text, 
+        "revision_count": count + 1,
+        "content_history": history
+    }
+
+# 定义节点 B：批评家
+def critic_node(state: AgentState):
+    draft = state['draft']
+    history = state.get('content_history', [])
+    
+    prompt = f"""
+    请审核以下草稿：
+    {draft}
+    
+    如果草稿写得非常完美且字数超过 50 字，请回复 'PASS'。
+    如果草稿太短或者有错误，请给出简短的修改建议（不要超过 20 字）。
+    """
+    
+    response = client.models.generate_content(
+        model=model_name, contents=prompt
+    )
+    
+    history.append(f"**🧐 批评家审核:** {response.text}")
+    
+    return {
+        "critique": response.text,
+        "content_history": history
+    }
+
+# 定义路由逻辑
+def should_continue(state: AgentState):
+    critique = state['critique']
+    count = state['revision_count']
+    
+    # 这里用侧边栏的 max_revisions 变量
+    if "PASS" in critique or count >= max_revisions:
+        return END
+    return "writer"
+
+# 构建图 (放到函数里，每次调用时构建)
+def get_graph():
+    workflow = StateGraph(AgentState)
+    workflow.add_node("writer", writer_node)
+    workflow.add_node("critic", critic_node)
+    workflow.set_entry_point("writer")
+    workflow.add_edge("writer", "critic")
+    workflow.add_conditional_edges("critic", should_continue, {END: END, "writer": "writer"})
+    return workflow.compile()
+
+# --- 5. 聊天界面逻辑 ---
+
 if "messages" not in st.session_state:
     st.session_state.messages = []
 
-# --- 5. 渲染历史消息 ---
-for message in st.session_state.messages:
-    with st.chat_message(message["role"]):
-        st.markdown(message["content"])
+# 渲染历史
+for msg in st.session_state.messages:
+    with st.chat_message(msg["role"]):
+        st.markdown(msg["content"])
+        # 如果有中间思考过程，用折叠面板显示
+        if "thoughts" in msg:
+            with st.expander("查看 AI 的思考/反思过程"):
+                for step in msg["thoughts"]:
+                    st.markdown(step)
+                    st.divider()
 
-# --- 6. 处理输入 ---
-if prompt := st.chat_input("输入指令..."):
-    # 显示用户消息
+# 处理输入
+if prompt := st.chat_input("输入一个主题（例如：Python语言、量子力学...）"):
+    # 1. 显示用户输入
     with st.chat_message("user"):
         st.markdown(prompt)
     st.session_state.messages.append({"role": "user", "content": prompt})
 
-    # 调用 AI
+    # 2. 运行 LangGraph
     with st.chat_message("assistant"):
-        message_placeholder = st.empty()
+        status_container = st.status("🧠 AI 正在进行深度思考循环...", expanded=True)
         
         try:
-            # 这里的 config 是新版 SDK 的写法
-            response = client.models.generate_content(
-                model=selected_model,
-                contents=prompt,
-                config=types.GenerateContentConfig(
-                    temperature=temperature,
-                    system_instruction=system_instruction # 注入侧边栏的人设
-                )
-            )
-            message_placeholder.markdown(response.text)
-            st.session_state.messages.append({"role": "assistant", "content": response.text})
+            app = get_graph()
+            inputs = {"task": prompt, "revision_count": 0, "content_history": []}
+            
+            # 运行图，拿到最终状态
+            final_state = app.invoke(inputs)
+            
+            # 更新状态容器
+            status_container.update(label=" 思考完成！", state="complete", expanded=False)
+            
+            # 显示最终结果
+            final_response = final_state['draft']
+            st.markdown(final_response)
+            
+            # 拿到中间过程历史
+            thoughts = final_state['content_history']
+            
+            # 在折叠面板里展示中间过程（让用户看到Writer和Critic的吵架过程）
+            with st.expander("点击查看 作家 vs 批评家 的博弈过程"):
+                for step in thoughts:
+                    st.markdown(step)
+                    st.divider()
+
+            # 保存到历史
+            st.session_state.messages.append({
+                "role": "assistant", 
+                "content": final_response,
+                "thoughts": thoughts # 把思考过程也存下来
+            })
             
         except Exception as e:
-            st.error(f" 调用失败: {e}")
+            status_container.update(label=" 出错了", state="error")
+            st.error(f"运行失败: {e}")
