@@ -30,6 +30,10 @@ with st.sidebar:
     model_name = st.selectbox("选择模型", ["gemini-2.5-flash", "gemini-2.5-flash-lite"], index=0)
     max_revisions = st.slider("最大反思次数", 1, 5, 2, help="批评家最多可以让作家重写几次？")
     
+    with st.expander(" 角色设定 (高级)"):
+        writer_instruction = st.text_area("作家设定", value="你是一个严谨的技术作家，善于使用简单的语言解释复杂的概念。")
+        critic_instruction = st.text_area("批评家设定", value="你是一个吹毛求疵的审核员，不仅检查事实错误，还关注逻辑连贯性和语气。")
+    
     if st.button(" 清空对话", use_container_width=True):
         st.session_state.messages = []
         st.rerun()
@@ -50,6 +54,8 @@ class AgentState(TypedDict):
     critique: str
     revision_count: int
     content_history: list # 用来记录中间过程，方便在网页展示
+    writer_instruction: str
+    critic_instruction: str
 
 # 定义节点 A：作家
 def writer_node(state: AgentState):
@@ -57,12 +63,17 @@ def writer_node(state: AgentState):
     critique = state.get('critique', "")
     count = state.get('revision_count', 0)
     history = state.get('content_history', [])
+    writer_instruction = state.get('writer_instruction', "")
     
     if count == 0:
-        prompt = f"请简短地写一段关于 '{task}' 的介绍。"
+        prompt = f"""
+        【你的角色设定】：{writer_instruction}
+        【任务】：请简短地写一段关于 '{task}' 的介绍。
+        """
         step_name = " 初稿创作中..."
     else:
         prompt = f"""
+        【你的角色设定】：{writer_instruction}
         原稿：{state['draft']}
         批评意见：{critique}
         任务：请根据批评意见，重写这段关于 '{task}' 的介绍。
@@ -86,8 +97,11 @@ def writer_node(state: AgentState):
 def critic_node(state: AgentState):
     draft = state['draft']
     history = state.get('content_history', [])
+    critic_instruction = state.get('critic_instruction', "")
     
     prompt = f"""
+    【你的角色设定】：{critic_instruction}
+    
     请审核以下草稿：
     {draft}
     
@@ -155,7 +169,13 @@ if prompt := st.chat_input("输入一个主题（例如：Python语言、量子�
         
         try:
             app = get_graph()
-            inputs = {"task": prompt, "revision_count": 0, "content_history": []}
+            inputs = {
+                "task": prompt, 
+                "revision_count": 0, 
+                "content_history": [],
+                "writer_instruction": writer_instruction,
+                "critic_instruction": critic_instruction
+            }
             
             # 运行图，拿到最终状态
             final_state = app.invoke(inputs)
